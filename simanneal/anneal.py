@@ -74,14 +74,16 @@ class Annealer(object):
             self.state = pickle.load(fh)
 
     @abc.abstractmethod
-    def move(self):
+    def move(self,values):
         """Create a state change"""
-        pass
+        E = self.energy(values)
+        self.state+=1
+        return (self.energy-E)
 
     @abc.abstractmethod
-    def energy(self):
+    def energy(self,values):
         """Calculate state's energy"""
-        pass
+        return values[self.state]
 
     def set_user_exit(self, signum, frame):
         """Raises the user_exit flag, further iterations are stopped
@@ -167,7 +169,7 @@ class Annealer(object):
                   file=sys.stderr, end="")
             sys.stderr.flush()
 
-    def anneal(self):
+    def anneal(self,values):
         """Minimizes the energy of a system by simulated annealing.
 
         Parameters
@@ -187,7 +189,7 @@ class Annealer(object):
 
         # Note initial state
         T = self.Tmax
-        E = self.energy()
+        E = self.energy(values)
         prevState = self.copy_state(self.state)
         prevEnergy = E
         self.best_state = self.copy_state(self.state)
@@ -201,32 +203,35 @@ class Annealer(object):
         while step < self.steps and not self.user_exit:
             step += 1
             T = self.Tmax * math.exp(Tfactor * step / self.steps)
-            dE = self.move()
-            if dE is None:
-                E = self.energy()
-                dE = E - prevEnergy
-            else:
-                E += dE
-            trials += 1
-            if dE > 0.0 and math.exp(-dE / T) < random.random():
-                # Restore previous state
-                self.state = self.copy_state(prevState)
-                E = prevEnergy
-            else:
-                # Accept new state and compare to best state
-                accepts += 1
-                if dE < 0.0:
-                    improves += 1
-                prevState = self.copy_state(self.state)
-                prevEnergy = E
-                if E < self.best_energy:
-                    self.best_state = self.copy_state(self.state)
-                    self.best_energy = E
+            for i in range(len(values)):
+                dE = self.move(values)
+                if dE is None:
+                    E = self.energy(values)
+                    dE = E - prevEnergy
+                else:
+                    E += dE
+                trials += 1
+                if dE > 0.0 or math.exp(dE / T) > random.random():
+                    # Accept new state and compare to best state
+                    accepts += 1
+                    if dE > 0.0:
+                        improves += 1
+                    prevState = self.copy_state(self.state)
+                    prevEnergy = E
+                    if E > self.best_energy:
+                        self.best_state = self.copy_state(self.state)
+                        self.best_energy = E
+                else:
+                     # Restore previous state
+                    self.state = self.copy_state(prevState)
+                    E = prevEnergy  
             if self.updates > 1:
                 if (step // updateWavelength) > ((step - 1) // updateWavelength):
                     self.update(
                         step, T, E, accepts / trials, improves / trials)
                     trials = accepts = improves = 0
+            self.state = 0
+            E = self.energy(values)
 
         self.state = self.copy_state(self.best_state)
         if self.save_state_on_exit:
@@ -235,37 +240,39 @@ class Annealer(object):
         # Return best state and energy
         return self.best_state, self.best_energy
 
-    def auto(self, minutes, steps=2000):
+    def auto(self, minutes,values,steps=2000):
         """Explores the annealing landscape and
         estimates optimal temperature settings.
 
         Returns a dictionary suitable for the `set_schedule` method.
         """
 
-        def run(T, steps):
+        def run(T,values):
             """Anneals a system at constant temperature and returns the state,
             energy, rate of acceptance, and rate of improvement."""
-            E = self.energy()
+            E = self.energy(values)
             prevState = self.copy_state(self.state)
             prevEnergy = E
+            trials = 0
             accepts, improves = 0, 0
-            for _ in range(steps):
-                dE = self.move()
+            for _ in range(len(values)):
+                dE = self.move(values)
                 if dE is None:
-                    E = self.energy()
+                    E = self.energy(values)
                     dE = E - prevEnergy
                 else:
                     E = prevEnergy + dE
-                if dE > 0.0 and math.exp(-dE / T) < random.random():
-                    self.state = self.copy_state(prevState)
-                    E = prevEnergy
-                else:
+                trials+=1    
+                if dE > 0.0 or math.exp(dE / T) > random.random():
                     accepts += 1
-                    if dE < 0.0:
+                    if dE > 0.0:
                         improves += 1
                     prevState = self.copy_state(self.state)
                     prevEnergy = E
-            return E, float(accepts) / steps, float(improves) / steps
+                else:
+                  self.state = self.copy_state(prevState)
+                  E = prevEnergy
+            return E, float(accepts) / trials, float(improves) / trials
 
         step = 0
         self.start = time.time()
@@ -273,36 +280,35 @@ class Annealer(object):
         # Attempting automatic simulated anneal...
         # Find an initial guess for temperature
         T = 0.0
-        E = self.energy()
+        E1 = self.energy(values)
         self.update(step, T, E, None, None)
         while T == 0.0:
             step += 1
-            dE = self.move()
-            if dE is None:
-                dE = self.energy() - E
-            T = abs(dE)
+#            dE = self.move(values)
+#            if dE is None:
+#                dE = self.energy(values) - E
+            E, acceptance, improvement = run(T,values)
+            T = abs(E-E1)
 
         # Search for Tmax - a temperature that gives 98% acceptance
-        E, acceptance, improvement = run(T, steps)
 
-        step += steps
         while acceptance > 0.98:
             T = round_figures(T / 1.5, 2)
-            E, acceptance, improvement = run(T, steps)
-            step += steps
-            self.update(step, T, E, acceptance, improvement)
+            E, acceptance, improvement = run(T, values)
+            step += 1    
+            self.update(step, T, E, acceptance, improvement)    
         while acceptance < 0.98:
             T = round_figures(T * 1.5, 2)
-            E, acceptance, improvement = run(T, steps)
-            step += steps
+            E, acceptance, improvement = run(T, values)
+            step += 1
             self.update(step, T, E, acceptance, improvement)
         Tmax = T
 
         # Search for Tmin - a temperature that gives 0% improvement
         while improvement > 0.0:
             T = round_figures(T / 1.5, 2)
-            E, acceptance, improvement = run(T, steps)
-            step += steps
+            E, acceptance, improvement = run(T, values)
+            step += 1
             self.update(step, T, E, acceptance, improvement)
         Tmin = T
 
